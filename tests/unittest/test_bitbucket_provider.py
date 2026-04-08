@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 from atlassian.bitbucket import Bitbucket
+from packaging.version import parse as parse_version
 
 from pr_agent.algo.types import EDIT_TYPE, FilePatchInfo
 from pr_agent.git_providers import BitbucketServerProvider
@@ -304,3 +305,122 @@ class TestBitbucketServerProvider:
         actual = provider.get_diff_files()
 
         assert actual == expected
+
+    def test_detect_capabilities_for_legacy_server(self):
+        bitbucket_client = MagicMock(Bitbucket)
+        bitbucket_client.get_pull_request.return_value = {
+            'toRef': {'latestCommit': 'to'},
+            'fromRef': {'latestCommit': 'from'},
+        }
+        bitbucket_client.get.return_value = {"version": "7.0"}
+
+        provider = BitbucketServerProvider(
+            "https://git.onpreminstance.com/projects/AAA/repos/my-repo/pull-requests/1",
+            bitbucket_client=bitbucket_client,
+        )
+        provider.bitbucket_api_version = parse_version("7.0")
+        capabilities = provider._detect_provider_capabilities()
+
+        assert capabilities.multiline_inline_comments is False
+        assert capabilities.multiline_code_suggestions is False
+        assert capabilities.suggestion_replacement_range is False
+        assert capabilities.suggestion_markdown_rendering is False
+
+    def test_detect_capabilities_for_newer_server(self):
+        bitbucket_client = MagicMock(Bitbucket)
+        bitbucket_client.get_pull_request.return_value = {
+            'toRef': {'latestCommit': 'to'},
+            'fromRef': {'latestCommit': 'from'},
+        }
+        bitbucket_client.get.return_value = {"version": "8.16"}
+
+        provider = BitbucketServerProvider(
+            "https://git.onpreminstance.com/projects/AAA/repos/my-repo/pull-requests/1",
+            bitbucket_client=bitbucket_client,
+        )
+        provider.bitbucket_api_version = parse_version("8.16")
+        capabilities = provider._detect_provider_capabilities()
+
+        assert capabilities.multiline_inline_comments is True
+        assert capabilities.multiline_code_suggestions is True
+        assert capabilities.suggestion_replacement_range is True
+        assert capabilities.suggestion_markdown_rendering is True
+
+    def test_range_payload_falls_back_to_single_line_for_legacy_server(self):
+        bitbucket_client = MagicMock(Bitbucket)
+        bitbucket_client.get_pull_request.return_value = {
+            'toRef': {'latestCommit': 'to'},
+            'fromRef': {'latestCommit': 'from'},
+        }
+        bitbucket_client.get.return_value = {"version": "7.0"}
+
+        provider = BitbucketServerProvider(
+            "https://git.onpreminstance.com/projects/AAA/repos/my-repo/pull-requests/1",
+            bitbucket_client=bitbucket_client,
+        )
+        provider.provider_capabilities = provider._detect_provider_capabilities()
+        payload = provider._build_inline_comment_payload(
+            comment="test",
+            file="a.py",
+            from_line=12,
+            start_line=10,
+            end_line=12,
+        )
+
+        assert payload["anchor"]["line"] == 10
+        assert "startLine" not in payload["anchor"]
+
+    def test_range_payload_uses_start_line_for_supported_server(self):
+        bitbucket_client = MagicMock(Bitbucket)
+        bitbucket_client.get_pull_request.return_value = {
+            'toRef': {'latestCommit': 'to'},
+            'fromRef': {'latestCommit': 'from'},
+        }
+        bitbucket_client.get.return_value = {"version": "8.16"}
+
+        provider = BitbucketServerProvider(
+            "https://git.onpreminstance.com/projects/AAA/repos/my-repo/pull-requests/1",
+            bitbucket_client=bitbucket_client,
+        )
+        provider.provider_capabilities = provider._detect_provider_capabilities()
+        payload = provider._build_inline_comment_payload(
+            comment="test",
+            file="a.py",
+            from_line=12,
+            start_line=10,
+            end_line=12,
+        )
+
+        assert payload["anchor"]["line"] == 12
+        assert payload["anchor"]["startLine"] == 10
+
+    def test_publish_code_suggestions_replaces_suggestion_block_when_markdown_not_supported(self):
+        bitbucket_client = MagicMock(Bitbucket)
+        bitbucket_client.get_pull_request.return_value = {
+            'toRef': {'latestCommit': 'to'},
+            'fromRef': {'latestCommit': 'from'},
+        }
+        bitbucket_client.get.return_value = {"version": "7.0"}
+        bitbucket_client.post.return_value = {}
+
+        provider = BitbucketServerProvider(
+            "https://git.onpreminstance.com/projects/AAA/repos/my-repo/pull-requests/1",
+            bitbucket_client=bitbucket_client,
+        )
+        provider.provider_capabilities = provider._detect_provider_capabilities()
+
+        result = provider.publish_code_suggestions(
+            [
+                {
+                    "body": "**Suggestion**\n```suggestion\nnew_line\n```",
+                    "relevant_file": "a.py",
+                    "relevant_lines_start": 10,
+                    "relevant_lines_end": 11,
+                    "original_suggestion": {"existing_code": "old_line", "improved_code": "new_line"},
+                }
+            ]
+        )
+
+        assert result is True
+        last_payload = bitbucket_client.post.call_args.kwargs["data"]
+        assert "```suggestion" not in last_payload["text"]

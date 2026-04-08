@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 # enum EDIT_TYPE (ADDED, DELETED, MODIFIED, RENAMED)
+from dataclasses import dataclass
 import os
 import shutil
 import subprocess
@@ -11,6 +12,15 @@ from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
 
 MAX_FILES_ALLOWED_FULL = 50
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    multiline_inline_comments: bool = False
+    multiline_code_suggestions: bool = False
+    suggestion_replacement_range: bool = False
+    suggestion_markdown_rendering: bool = True
+    version_compatibility_fallback: bool = True
 
 def get_git_ssl_env() -> dict[str, str]:
     """
@@ -75,6 +85,9 @@ class GitProvider(ABC):
     @abstractmethod
     def is_supported(self, capability: str) -> bool:
         pass
+
+    def get_provider_capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
 
     #Given a url (issues or PR/MR) - get the .git repo url to which they belong. Needs to be implemented by the provider.
     def get_git_repo_url(self, issues_or_pr_url: str) -> str:

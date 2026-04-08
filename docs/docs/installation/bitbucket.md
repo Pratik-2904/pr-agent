@@ -75,3 +75,52 @@ Navigate to `Projects` or `Repositories`, `Settings`, `Webhooks`, `Create Webhoo
 Fill in the name and URL. For Authentication, select 'None'. Select the 'Pull Request Opened' checkbox to receive that event as a webhook.
 
 The URL should end with `/webhook`, for example: https://domain.com/webhook
+
+### Multiline `/improve` suggestions on Bitbucket Server/Data Center
+
+When `pr_code_suggestions.commitable_code_suggestions = true`, PR-Agent now publishes multiline suggestion anchors on
+Bitbucket Server/DC versions that support range comments.
+
+Behavior is version-aware:
+
+- **Supported version**: posts anchor payload with `startLine` + `line` (range comment anchor).
+- **Unsupported version**: falls back to a single-line anchor and converts ````suggestion` blocks into plain fenced code blocks.
+
+Sample multiline payload (supported versions):
+
+```json
+{
+  "text": "**Suggestion:** Replace deprecated API\n```suggestion\nnew_call()\n```",
+  "severity": "NORMAL",
+  "anchor": {
+    "diffType": "EFFECTIVE",
+    "path": "src/service.py",
+    "lineType": "ADDED",
+    "line": 42,
+    "startLine": 39,
+    "startLineType": "ADDED",
+    "fileType": "TO"
+  }
+}
+```
+
+Fallback payload shape (legacy versions):
+
+```json
+{
+  "text": "**Suggestion:** Replace deprecated API\n```\nnew_call()\n```",
+  "severity": "NORMAL",
+  "anchor": {
+    "diffType": "EFFECTIVE",
+    "path": "src/service.py",
+    "lineType": "ADDED",
+    "line": 39,
+    "fileType": "TO"
+  }
+}
+```
+
+Debug logs include explicit fallback markers:
+
+- `BITBUCKET_SERVER_MULTILINE_SUGGESTION_FALLBACK`
+- `BITBUCKET_SERVER_RANGE_COMMENT_FALLBACK`
