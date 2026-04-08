@@ -597,8 +597,8 @@ class PRCodeSuggestions:
         if relevant_lines_start <= 0 or relevant_lines_end < relevant_lines_start:
             return False
         try:
-            self.diff_files = self.git_provider.diff_files if self.git_provider.diff_files else self.git_provider.get_diff_files()
-            for file in self.diff_files:
+            diff_files = self.git_provider.diff_files if self.git_provider.diff_files else self.git_provider.get_diff_files()
+            for file in diff_files:
                 if file.filename.strip() == relevant_file and file.head_file:
                     file_lines = file.head_file.splitlines()
                     return relevant_lines_end <= len(file_lines)

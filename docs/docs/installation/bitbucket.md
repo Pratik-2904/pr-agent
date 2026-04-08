@@ -108,7 +108,7 @@ Fallback payload shape (legacy versions):
 
 ```json
 {
-  "text": "**Suggestion:** Replace deprecated API\n```\\nnew_call()\\n```",
+  "text": "**Suggestion:** Replace deprecated API\n```\nnew_call()\n```",
   "severity": "NORMAL",
   "anchor": {
     "diffType": "EFFECTIVE",
