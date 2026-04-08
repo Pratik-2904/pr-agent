@@ -603,7 +603,10 @@ class PRCodeSuggestions:
                     file_lines = file.head_file.splitlines()
                     return relevant_lines_end <= len(file_lines)
         except Exception as e:
-            get_logger().warning(f"Failed validating replacement line range for file {relevant_file}, error: {e}")
+            get_logger().warning(
+                "Failed validating replacement line range",
+                artifact={"relevant_file": relevant_file, "error": str(e)},
+            )
         return False
 
     def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet):
