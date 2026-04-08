@@ -1,5 +1,7 @@
 import difflib
 import re
+import shlex
+import subprocess
 
 from packaging.version import parse as parse_version
 from typing import Optional, Tuple
@@ -7,8 +9,6 @@ from urllib.parse import quote_plus, urlparse
 
 from atlassian.bitbucket import Bitbucket
 from requests.exceptions import HTTPError
-import shlex
-import subprocess
 
 from ..algo.file_filter import filter_ignored
 from ..algo.git_patch_processing import decode_if_bytes
@@ -18,10 +18,14 @@ from ..algo.utils import (find_line_number_of_relevant_line_in_file,
                           load_large_diff)
 from ..config_loader import get_settings
 from ..log import get_logger
-from .git_provider import GitProvider, get_git_ssl_env
+from .git_provider import GitProvider, ProviderCapabilities, get_git_ssl_env
 
 
 class BitbucketServerProvider(GitProvider):
+    MULTILINE_COMMENTS_MIN_VERSION = parse_version("8.16")
+    MULTILINE_SUGGESTIONS_MIN_VERSION = parse_version("8.16")
+    SUGGESTION_MARKDOWN_MIN_VERSION = parse_version("8.16")
+
     def __init__(
             self, pr_url: Optional[str] = None, incremental: Optional[bool] = False,
             bitbucket_client: Optional[Bitbucket] = None,
@@ -64,6 +68,7 @@ class BitbucketServerProvider(GitProvider):
             self.bitbucket_api_version = parse_version(self.bitbucket_client.get("rest/api/1.0/application-properties").get('version'))
         except Exception:
             self.bitbucket_api_version = None
+        self.provider_capabilities = self._detect_provider_capabilities()
 
         if pr_url:
             self.set_pr(pr_url)
@@ -127,7 +132,7 @@ class BitbucketServerProvider(GitProvider):
         for suggestion in code_suggestions:
             body = suggestion["body"]
             original_suggestion = suggestion.get('original_suggestion', None)  # needed for diff code
-            if original_suggestion:
+            if original_suggestion and not self.provider_capabilities.suggestion_markdown_rendering:
                 try:
                     existing_code = original_suggestion['existing_code'].rstrip() + "\n"
                     improved_code = original_suggestion['improved_code'].rstrip() + "\n"
@@ -160,14 +165,24 @@ class BitbucketServerProvider(GitProvider):
                 continue
 
             if relevant_lines_end > relevant_lines_start:
-                # Bitbucket does not support multi-line suggestions so use a code block instead - https://jira.atlassian.com/browse/BSERV-4553
-                body = body.replace("```suggestion", "```")
+                if not self.provider_capabilities.multiline_code_suggestions:
+                    body = body.replace("```suggestion", "```")
+                    get_logger().debug(
+                        "BITBUCKET_SERVER_MULTILINE_SUGGESTION_FALLBACK",
+                        artifact={
+                            "provider_version": str(self.bitbucket_api_version),
+                            "path": relevant_file,
+                            "start_line": relevant_lines_start,
+                            "end_line": relevant_lines_end,
+                        },
+                    )
                 post_parameters = {
                     "body": body,
                     "path": relevant_file,
                     "line": relevant_lines_end,
                     "start_line": relevant_lines_start,
                     "start_side": "RIGHT",
+                    "end_side": "RIGHT",
                 }
             else:  # API is different for single line comments
                 post_parameters = {
@@ -192,7 +207,18 @@ class BitbucketServerProvider(GitProvider):
     def is_supported(self, capability: str) -> bool:
         if capability in ['get_issue_comments', 'get_labels', 'gfm_markdown', 'publish_file_comments']:
             return False
+        if capability == "multiline_inline_comments":
+            return self.provider_capabilities.multiline_inline_comments
+        if capability == "multiline_code_suggestions":
+            return self.provider_capabilities.multiline_code_suggestions
+        if capability == "suggestion_replacement_range":
+            return self.provider_capabilities.suggestion_replacement_range
+        if capability == "version_compatibility_fallback":
+            return self.provider_capabilities.version_compatibility_fallback
         return True
+
+    def get_provider_capabilities(self) -> ProviderCapabilities:
+        return self.provider_capabilities
 
     def set_pr(self, pr_url: str):
         self.workspace_slug, self.repo_slug, self.pr_num = self._parse_pr_url(pr_url)
@@ -339,24 +365,75 @@ class BitbucketServerProvider(GitProvider):
         path = relevant_file.strip()
         return dict(body=body, path=path, position=absolute_position) if subject_type == "LINE" else {}
 
-    def publish_inline_comment(self, comment: str, from_line: int, file: str, original_suggestion=None):
-        payload = {
-            "text": comment,
-            "severity": "NORMAL",
-            "anchor": {
-                "diffType": "EFFECTIVE",
-                "path": file,
-                "lineType": "ADDED",
-                "line": from_line,
-                "fileType": "TO"
-            }
-        }
+    def publish_inline_comment(
+        self,
+        comment: str,
+        from_line: int,
+        file: str,
+        original_suggestion=None,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        start_side: str = "RIGHT",
+        end_side: str = "RIGHT",
+    ):
+        payload = self._build_inline_comment_payload(
+            comment=comment,
+            file=file,
+            from_line=from_line,
+            start_line=start_line,
+            end_line=end_line,
+            start_side=start_side,
+            end_side=end_side,
+        )
 
         try:
             self.bitbucket_client.post(self._get_pr_comments_path(), data=payload)
         except Exception as e:
             get_logger().error(f"Failed to publish inline comment to '{file}' at line {from_line}, error: {e}")
             raise e
+
+    def _build_inline_comment_payload(
+        self,
+        comment: str,
+        file: str,
+        from_line: int,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        start_side: str = "RIGHT",
+        end_side: str = "RIGHT",
+    ) -> dict:
+        line = end_line if end_line is not None else from_line
+        anchor = {
+            "diffType": "EFFECTIVE",
+            "path": file,
+            "lineType": "ADDED",
+            "line": line,
+            "fileType": "TO",
+        }
+        use_range = (
+            start_line is not None
+            and end_line is not None
+            and end_line >= start_line
+            and self.provider_capabilities.multiline_inline_comments
+            and self.provider_capabilities.suggestion_replacement_range
+        )
+        if use_range:
+            anchor["startLine"] = start_line
+            anchor["startLineType"] = "ADDED"
+        elif start_line is not None and end_line is not None and end_line > start_line:
+            get_logger().debug(
+                "BITBUCKET_SERVER_RANGE_COMMENT_FALLBACK",
+                artifact={
+                    "provider_version": str(self.bitbucket_api_version),
+                    "path": file,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "start_side": start_side,
+                    "end_side": end_side,
+                },
+            )
+            anchor["line"] = start_line
+        return {"text": comment, "severity": "NORMAL", "anchor": anchor}
 
     def get_line_link(self, relevant_file: str, relevant_line_start: int, relevant_line_end: int = None) -> str:
         if relevant_line_start == -1:
@@ -401,12 +478,40 @@ class BitbucketServerProvider(GitProvider):
             if 'position' in comment:
                 self.publish_inline_comment(comment['body'], comment['position'], comment['path'])
             elif 'start_line' in comment: # multi-line comment
-                # note that bitbucket does not seem to support range - only a comment on a single line - https://community.developer.atlassian.com/t/api-post-endpoint-for-inline-pull-request-comments/60452
-                self.publish_inline_comment(comment['body'], comment['start_line'], comment['path'])
+                self.publish_inline_comment(
+                    comment['body'],
+                    comment['line'],
+                    comment['path'],
+                    start_line=comment['start_line'],
+                    end_line=comment['line'],
+                    start_side=comment.get('start_side', 'RIGHT'),
+                    end_side=comment.get('end_side', 'RIGHT'),
+                )
             elif 'line' in comment: # single-line comment
                 self.publish_inline_comment(comment['body'], comment['line'], comment['path'])
             else:
                 get_logger().error(f"Could not publish inline comment: {comment}")
+
+    def _detect_provider_capabilities(self) -> ProviderCapabilities:
+        version = self.bitbucket_api_version
+        if version is None:
+            return ProviderCapabilities(
+                multiline_inline_comments=False,
+                multiline_code_suggestions=False,
+                suggestion_replacement_range=False,
+                suggestion_markdown_rendering=False,
+                version_compatibility_fallback=True,
+            )
+        supports_multiline = version >= self.MULTILINE_COMMENTS_MIN_VERSION
+        supports_suggestions = version >= self.MULTILINE_SUGGESTIONS_MIN_VERSION
+        supports_markdown = version >= self.SUGGESTION_MARKDOWN_MIN_VERSION
+        return ProviderCapabilities(
+            multiline_inline_comments=supports_multiline,
+            multiline_code_suggestions=supports_suggestions,
+            suggestion_replacement_range=supports_multiline,
+            suggestion_markdown_rendering=supports_markdown,
+            version_compatibility_fallback=True,
+        )
 
     def get_title(self):
         return self.pr.title

@@ -557,6 +557,21 @@ class PRCodeSuggestions:
                 content = d['suggestion_content'].rstrip()
                 new_code_snippet = d['improved_code'].rstrip()
                 label = d['label'].strip()
+                if get_settings().pr_code_suggestions.commitable_code_suggestions:
+                    if not self.validate_replacement_line_range(
+                        relevant_file=relevant_file,
+                        relevant_lines_start=relevant_lines_start,
+                        relevant_lines_end=relevant_lines_end,
+                    ):
+                        get_logger().warning(
+                            "Skipping suggestion because replacement range is invalid",
+                            artifact={
+                                "relevant_file": relevant_file,
+                                "relevant_lines_start": relevant_lines_start,
+                                "relevant_lines_end": relevant_lines_end,
+                            },
+                        )
+                        continue
 
                 if new_code_snippet:
                     new_code_snippet = self.dedent_code(relevant_file, relevant_lines_start, new_code_snippet)
@@ -577,6 +592,19 @@ class PRCodeSuggestions:
             get_logger().info("Failed to publish code suggestions, trying to publish each suggestion separately")
             for code_suggestion in code_suggestions:
                 self.git_provider.publish_code_suggestions([code_suggestion])
+
+    def validate_replacement_line_range(self, relevant_file: str, relevant_lines_start: int, relevant_lines_end: int) -> bool:
+        if relevant_lines_start <= 0 or relevant_lines_end < relevant_lines_start:
+            return False
+        try:
+            self.diff_files = self.git_provider.diff_files if self.git_provider.diff_files else self.git_provider.get_diff_files()
+            for file in self.diff_files:
+                if file.filename.strip() == relevant_file and file.head_file:
+                    file_lines = file.head_file.splitlines()
+                    return relevant_lines_end <= len(file_lines)
+        except Exception as e:
+            get_logger().warning(f"Failed validating replacement line range for file {relevant_file}, error: {e}")
+        return False
 
     def dedent_code(self, relevant_file, relevant_lines_start, new_code_snippet):
         try:  # dedent code snippet

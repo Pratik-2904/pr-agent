@@ -1,3 +1,18 @@
+## [Unreleased]
+
+### Added::Bitbucket Server
+
+- Added provider capability detection for Bitbucket Server/Data Center multiline inline comments, multiline code suggestions,
+  replacement ranges, and markdown suggestion rendering with version-aware fallback behavior.
+- `/improve` now validates suggestion replacement ranges before attempting to publish committable code suggestions.
+
+### Changed::Bitbucket Server
+
+- Improved inline suggestion publishing to use multiline anchor payloads when supported and gracefully fall back to single-line
+  anchors and plain fenced code blocks on older Bitbucket Server/DC versions.
+- Added explicit fallback debug markers:
+  `BITBUCKET_SERVER_MULTILINE_SUGGESTION_FALLBACK` and `BITBUCKET_SERVER_RANGE_COMMENT_FALLBACK`.
+
 ## [Version 0.11] - 2023-12-07
 
 - codiumai/pr-agent:0.11
